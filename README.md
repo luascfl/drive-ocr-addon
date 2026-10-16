@@ -1,6 +1,6 @@
 # OCR for Drive
 
-A Google Drive add-on that makes scanned PDFs searchable. Select a PDF in Drive, click **Start OCR**, and a copy named `<name> (OCR).pdf` appears next to the original. The copy keeps the original images and adds an invisible text layer, so it stays about 1% larger than the source instead of re-encoding every page.
+A Google Drive add-on that makes scanned PDFs searchable. Select a PDF in Drive and click **Start OCR**: the add-on straightens sideways pages, splits double-page scans down the middle, runs OCR, and **replaces the file** with the searchable version. The result keeps the original images and adds an invisible text layer, so it stays about 1% larger than the source instead of re-encoding every page. A **Revert OCR** button takes the place of Start OCR afterwards and restores the original byte for byte. **Flatten and re-OCR** writes a separate `<name> (flatten).pdf` so an existing OCR can be compared with ours.
 
 **Status: testing phase.** The add-on has not been through Google's OAuth verification, so Google shows an "unverified app" screen. It works for the developer's own account; it is not published on the Marketplace.
 
@@ -8,23 +8,27 @@ A Google Drive add-on that makes scanned PDFs searchable. Select a PDF in Drive,
 
 ```
 Drive card (Apps Script)        OCR server (Oracle Always Free VM)
-  "Start OCR"  ── file id + user's OAuth token ──►  POST /jobs   (202, returns at once)
+  "Start OCR"  ── file id + action + user's OAuth token ──►  POST /jobs   (202, returns at once)
                                                       │ validate token (aud + drive.file), identify user
                                                       │ download the PDF from Drive with the user's token
+                                                      │ straighten sideways pages, split double-page spreads
                                                       │ per page: pdftoppm → tesseract (text layer only)
-                                                      │ qpdf --overlay on the ORIGINAL pdf
-                                                      └ upload "<name> (OCR).pdf" into the original's folder
+                                                      │ qpdf --overlay on the (prepared) original
+                                                      └ pin the original revision, then replace the file
+  "Revert OCR" ── action revert ──────────────────►  restore the pinned revision (only if the file is still our result)
   "View OCR status" ──────────────────────────────►  GET /jobs/<id>   (only the owner can see a job)
 ```
 
 - The card callback never carries the PDF: Apps Script card callbacks stop at 30 s, so it only sends the file id and returns in about one second.
-- The server writes the result only if Drive confirms the original's parent folder. Creating a file without `parents` lands in the root of My Drive, so the job fails with `no_parents` instead.
-- Pages that already have text are skipped, and a PDF that is searchable on every page is refused (`already_searchable`).
-- If the overlay is unsafe (a page whose CropBox differs from its MediaBox) or `qpdf` fails, the server falls back to full mode, which re-embeds the page images and makes the file roughly 2.7 times larger.
+- One button does everything. If the add-on has no access to the file yet, Start OCR opens Drive's permission dialog and the OCR starts by itself once you allow it.
+- Order of the steps, chosen to do the cheap checks first: (1) refuse a PDF that already has text on every page; (2) straighten sideways pages (Tesseract orientation detection on up to 5 sampled pages, majority vote); (3) split double-page spreads (a dark binding shadow or a blank gap of at least 3% of the width, found on a 60 DPI render, cut through its middle; no reliable gutter means no split); (4) OCR only the pages that have no text; (5) overlay the text layer on the original with `qpdf` (no re-encoding); (6) replace the file.
+- **Replace is reversible.** Before replacing, the server pins the original revision (`keepForever`) and stores its id, the md5 of the result and the date in the file's `appProperties`. **Revert OCR** restores that revision, but only while the file is still exactly our result: an edit made after the OCR is never thrown away. If the original cannot be pinned, nothing is replaced.
+- Safety stops: the file changed while it was processed (`file_changed`), no permission to edit it (`drive_forbidden`), and a PDF whose text layer cannot be overlaid without re-encoding its pages (a CropBox different from the MediaBox) is left alone (`overlay_unavailable`); use Flatten for those.
+- **Flatten and re-OCR** ignores any text the PDF already has, rasterizes every page, runs OCR again and writes a new file next to the original, only when Drive confirms the original's folder (`no_parents` otherwise).
 
 ## Privacy
 
-Document content is never stored: the PDF and rendered pages live in a temporary directory for the duration of the job and are removed afterwards (a plain delete, not a secure wipe). The user's token is kept only in memory during the job. Logs hold sizes, page counts, timings and error codes, never file names, ids, e-mail addresses or text. See [the privacy policy](docs/privacy.html).
+Document content is never stored by the server: the PDF and rendered pages live in a temporary directory for the duration of the job and are removed afterwards (a plain delete, not a secure wipe). The user's token is kept only in memory during the job. In the user's own Drive, replacing a file keeps the original as a pinned earlier version (it counts toward the user's storage until reverted) and adds three small private properties to the file (`ocrPrevRev`, `ocrMd5`, `ocrAt`). Logs hold sizes, page counts, timings and error codes, never file names, ids, e-mail addresses or text. See [the privacy policy](docs/privacy.html).
 
 ## Limits
 
@@ -47,11 +51,11 @@ Per user: 2 active jobs and 30 jobs per 24 hours. Per file: 50 MB and 60 pages. 
 The server tests run against a fake Google (token info, Drive and upload endpoints), so they need no network and no Google account.
 
 ```bash
-sudo apt-get install tesseract-ocr tesseract-ocr-por tesseract-ocr-eng poppler-utils qpdf imagemagick
+sudo apt-get install tesseract-ocr tesseract-ocr-por tesseract-ocr-eng tesseract-ocr-osd poppler-utils qpdf python3-pypdf imagemagick
 python3 -m unittest server.test_server -v
 ```
 
-Tests that depend on `qpdf` are skipped when it is missing, and the server then always uses full mode.
+Tests that depend on `qpdf` or `pypdf` are skipped when they are missing. Without `qpdf` the server cannot add a text layer to the original, so Start OCR is refused (`overlay_unavailable`) and only Flatten works; without `pypdf` double-page spreads are not split.
 
 ## Running the server
 

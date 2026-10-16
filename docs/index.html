@@ -13,14 +13,15 @@
 </head>
 <body>
 <h1>OCR for Drive</h1>
-<p>A Google Drive add-on that makes scanned PDFs <strong>searchable</strong>. Select a PDF in Drive, click "Start OCR", and within minutes a new file named <code>&lt;name&gt; (OCR).pdf</code> appears next to the original, with selectable, searchable text. The original is never modified.</p>
+<p>A Google Drive add-on that makes scanned PDFs <strong>searchable</strong>. Select a PDF in Drive and click "Start OCR". Within minutes the file is replaced with a version that has selectable, searchable text. Sideways pages are straightened and double-page scans are split down the middle first. The original is kept as an earlier version, and a "Revert OCR" button restores it exactly.</p>
 
 <h2>What it does</h2>
 <ul>
   <li>Recognizes text with Tesseract. The add-on currently requests Portuguese and English; the server also has Arabic and Hebrew installed, but they are not selectable in the add-on yet.</li>
   <li>Keeps the PDF's original images and adds only an invisible text layer, so the new file is about 1% larger than the original.</li>
-  <li>Works only on the files you grant, one at a time, and saves the result in the same folder as the original.</li>
-  <li>PDFs that already have text on every page are refused, and no file is created.</li>
+  <li>Works only on the files you grant, one at a time. If you have not granted a file yet, Start OCR asks for permission and then starts by itself.</li>
+  <li>"Flatten and re-OCR" saves a separate copy named <code>&lt;name&gt; (flatten).pdf</code>, so you can compare an OCR that already existed with ours.</li>
+  <li>PDFs that already have text on every page are refused, and nothing is changed.</li>
 </ul>
 
 <h2>Current limits</h2>

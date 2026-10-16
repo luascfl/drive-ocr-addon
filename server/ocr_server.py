@@ -2,12 +2,15 @@
 """Add-on OCR service.
 
 Routes:
-- POST /jobs      Authorization: Bearer <user's OAuth token, drive.file scope>; JSON {"fileId", "lang"?, "psm"?}.
+- POST /jobs      Authorization: Bearer <user's OAuth token, drive.file scope>; JSON {"fileId", "action"?, "lang"?, "psm"?}.
                   The token is validated (aud = OCR_ALLOWED_AUD, drive.file scope) and the user is identified by the
-                  Drive permissionId (only an in-memory HMAC). Queues the job and answers 202 right away. The server
-                  downloads the PDF from Drive with that same token, runs OCR in the background and writes
-                  "<name> (OCR).pdf" to the SAME folder as the original. Without confirmed `parents` the job fails:
-                  a create call without `parents` lands in the root of My Drive (measured in the US-002 spike).
+                  Drive permissionId (only an in-memory HMAC). Queues the job and answers 202 right away.
+                  action "replace" (default): downloads the PDF, straightens sideways pages, splits double-page spreads,
+                  runs OCR on the pages without text and REPLACES the file's content, after pinning the original
+                  revision (keepForever) and recording it in the file's appProperties. action "revert": restores that
+                  revision, only while the file still equals our result. action "flatten": ignores existing text,
+                  re-runs OCR on every page and writes a NEW "<name> (flatten).pdf" in the original's folder (it needs
+                  confirmed `parents`: a create call without them lands in the root of My Drive, measured in US-002).
                   Per-user limits: 2 active jobs and 30 per 24 h (429).
 - GET  /jobs/<id> same header; only the owner sees the job (another user gets 404): queued, running, done or error
                   (with a short code, no document text).
@@ -21,6 +24,7 @@ Environment: OCR_TOKEN (required, /process only), OCR_ALLOWED_AUD (required, the
 comma), OCR_HOST (127.0.0.1; the HTTPS proxy sits in front), OCR_PORT (8080), OCR_MAX_MB (50), OCR_MAX_PAGES (100),
 OCR_DPI (300), OCR_QUEUE_MAX (5), OCR_USER_ACTIVE_MAX (2), OCR_USER_DAILY_MAX (30), OCR_TOKENINFO_URL.
 """
+import collections
 import hashlib
 import hmac
 import json
@@ -47,6 +51,8 @@ MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "100"))
 DPI = int(os.environ.get("OCR_DPI", "300"))
 QUEUE_MAX = int(os.environ.get("OCR_QUEUE_MAX", "5"))
 TEXT_MIN_CHARS = int(os.environ.get("OCR_TEXT_MIN_CHARS", "25"))  # a page with this much extractable text already counts as searchable
+OSD_MIN_CONF = float(os.environ.get("OCR_OSD_MIN_CONF", "3"))  # Tesseract orientation confidence needed for a page to vote
+SPREAD_MIN_ASPECT = float(os.environ.get("OCR_SPREAD_MIN_ASPECT", "1.2"))  # width/height from which a page may be a two-page spread
 DRIVE_API = os.environ.get("OCR_DRIVE_API", "https://www.googleapis.com/drive/v3")
 DRIVE_UPLOAD = os.environ.get("OCR_DRIVE_UPLOAD", "https://www.googleapis.com/upload/drive/v3")
 JOB_TTL = 3600
@@ -124,7 +130,171 @@ def pages_with_text(src, pages):
     return found
 
 
-def ocr_pdf(src, work, langs, dpi, psm=None, overlay=True):
+PGM_DARK = bytes(1 if v < 128 else 0 for v in range(256))
+
+
+def read_pgm(path):
+    """Reads a binary PGM (P5) written by pdftoppm -gray: returns (width, height, pixel bytes)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    m = re.match(rb"P5\s+(\d+)\s+(\d+)\s+(\d+)\s", data)
+    if not m:
+        raise ValueError("not a P5 PGM")
+    w, h = int(m.group(1)), int(m.group(2))
+    return w, h, data[m.end():m.end() + w * h]
+
+
+def find_gutter(w, h, px):
+    """Looks for a vertical gutter in a rendered spread. Returns the cut as a fraction of the page width, or None.
+
+    Two kinds of gutter are accepted, both only near the middle of the page and both continuous along the whole height
+    (a column is 'continuous' because its ink fraction is computed over every row):
+    - a blank gap (ink fraction <= 0.2% of the height) wide enough to be a margin pair, with text on BOTH sides;
+    - a dark shadow band (ink fraction >= 50%) with lighter flanks, centered on the band.
+    The cut goes through the middle of the gap, so it cannot slice a word. Nothing reliable found: None (no split)."""
+    if w < 50 or h < 50 or len(px) < w * h:
+        return None
+    ink = [px[x::w][:h].translate(PGM_DARK).count(1) / h for x in range(w)]
+    lo, hi = int(w * 0.35), int(w * 0.65)
+
+    def runs(pred, min_run):
+        out, start = [], None
+        for x in range(w + 1):
+            ok = x < w and pred(ink[x])
+            if ok and start is None:
+                start = x
+            elif not ok and start is not None:
+                out.append((start, x))
+                start = None
+        return [r for r in out if r[1] - r[0] >= min_run and r[0] <= hi and r[1] >= lo]
+
+    def side_ink(a, b):
+        return sum(ink[a:b]) / (b - a) if b > a else 0.0
+
+    # 1) dark shadow band (at least 1% wide, 50%+ ink along the whole height): this is the real binding, so it wins
+    flank = max(3, int(w * 0.03))
+    for a, b in sorted(runs(lambda v: v >= 0.5, max(2, int(w * 0.01))), key=lambda r: r[0] - r[1]):
+        if a > flank and b + flank < w and side_ink(a - flank, a) < 0.3 and side_ink(b, b + flank) < 0.3 \
+                and side_ink(0, a) >= 0.004 and side_ink(b, w) >= 0.004:
+            return (a + b) / 2 / w
+    # 2) blank gap of at least 3% of the width (a word space is about 1%, a pair of page margins is much wider)
+    gaps = [r for r in runs(lambda v: v <= 0.002, max(3, int(w * 0.03))) if r[0] > 0 and r[1] < w
+            and side_ink(0, r[0]) >= 0.004 and side_ink(r[1], w) >= 0.004]
+    if gaps:
+        a, b = max(gaps, key=lambda r: r[1] - r[0])
+        return (a + b) / 2 / w
+    return None
+
+
+def sample_pages(pages, k=5):
+    """Up to k page numbers (1-based) spread evenly over the document."""
+    if pages <= k:
+        return list(range(1, pages + 1))
+    return sorted({1 + round(i * (pages - 1) / (k - 1)) for i in range(k)})
+
+
+def detect_rotation(src, work, pages):
+    """Clockwise rotation (0, 90, 180 or 270) that makes most of the document upright, by a vote of Tesseract's
+    orientation detection (OSD) over a few sampled pages. Pages where OSD is unsure (blank, few characters, low
+    confidence) do not vote. A rotation needs a strict majority of the confident votes."""
+    votes = []
+    env = dict(os.environ, OMP_THREAD_LIMIT="1")
+    for n in sample_pages(pages):
+        base = os.path.join(work, f"osd{n:04d}")
+        if run(["pdftoppm", "-r", "150", "-gray", "-f", str(n), "-l", str(n), "-singlefile", src, base]).returncode != 0:
+            continue
+        r = run(["tesseract", base + ".pgm", "stdout", "--psm", "0"], env=env)
+        os.remove(base + ".pgm")
+        rot = re.search(r"^Rotate:\s+(\d+)", r.stdout, re.M)
+        conf = re.search(r"^Orientation confidence:\s+([\d.]+)", r.stdout, re.M)
+        if rot and conf and float(conf.group(1)) >= OSD_MIN_CONF:
+            votes.append(int(rot.group(1)) % 360)
+    if not votes:
+        return 0
+    rot, count = collections.Counter(votes).most_common(1)[0]
+    return rot if rot and count * 2 > len(votes) else 0
+
+
+def page_sizes(path, pages):
+    """Displayed (width, height) in points per page, after /Rotate."""
+    r = run(["pdfinfo", "-f", "1", "-l", str(pages), path])
+    return [(float(a), float(b)) for a, b in re.findall(r"^Page\s+\d+ size:\s+([\d.]+) x ([\d.]+)", r.stdout, re.M)]
+
+
+def rewrite_pages(src, dst, cuts):
+    """One pass with pypdf: bakes any /Rotate into the content and splits the pages in `cuts` ({0-based page:
+    fraction of the width}) by cropping, with no re-rasterizing and no copy of the images.
+
+    Both halves are clones of the SAME page, so they share its content and its images; each one only gets its own
+    mediabox/cropbox (the right half's box starts at x > 0, and qpdf --overlay lines the text layer up with it:
+    measured 0.0 pt against full-mode OCR). The content is never translated, which is what keeps the file small:
+    translating needs one reader per half, which copied the images (measured: 39,747 B became 84,814 B)."""
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import RectangleObject
+    reader, writer = PdfReader(src), PdfWriter()
+    for i, page in enumerate(reader.pages):
+        if page.rotation % 360:
+            page.transfer_rotation_to_content()
+        if i not in cuts:
+            writer.add_page(page)
+            continue
+        box = page.cropbox
+        x0, y0, x1, y1 = (float(v) for v in (box.left, box.bottom, box.right, box.top))
+        cut = x0 + (x1 - x0) * cuts[i]
+        for left, right in ((x0, cut), (cut, x1)):
+            added = writer.add_page(page)
+            rect = RectangleObject((left, y0, right, y1))
+            for name in ("mediabox", "cropbox", "trimbox", "bleedbox", "artbox"):
+                setattr(added, name, rect)
+    with open(dst, "wb") as fh:
+        writer.write(fh)
+
+
+def prepare_pdf(src, work, pages, info):
+    """Prepares a PDF for OCR, in this order: (1) orientation, (2) split of double-page spreads. Returns the path of
+    the prepared PDF (`src` itself when nothing needed to change) and fills `info` with `rotated` (degrees) and
+    `split` (number of pages that were split). A failure in an optional step is logged and skipped, never fatal.
+    Rotation goes first because the crop split assumes upright pages (a sideways spread is not landscape)."""
+    info.update(rotated=0, split=0)
+    cur = src
+    try:
+        rot = detect_rotation(src, work, pages)
+    except Exception as e:  # noqa: BLE001
+        log(ev="prep_error", step="rotation", type=type(e).__name__)
+        rot = 0
+    if rot:
+        rotated = os.path.join(work, "rotated.pdf")
+        r = run(["qpdf", "--rotate=+%d" % rot, src, "--", rotated])
+        if r.returncode in (0, 3) and os.path.exists(rotated) and page_count(rotated) == pages:
+            cur, info["rotated"] = rotated, rot
+    cuts = {}
+    try:
+        for i, (w, h) in enumerate(page_sizes(cur, pages)):
+            if w / h < SPREAD_MIN_ASPECT:
+                continue  # only landscape pages can be two pages side by side
+            base = os.path.join(work, f"gut{i:04d}")
+            if run(["pdftoppm", "-r", "60", "-gray", "-f", str(i + 1), "-l", str(i + 1), "-singlefile", cur, base]).returncode != 0:
+                continue
+            cut = find_gutter(*read_pgm(base + ".pgm"))
+            os.remove(base + ".pgm")
+            if cut is not None:
+                cuts[i] = cut
+    except Exception as e:  # noqa: BLE001
+        log(ev="prep_error", step="gutter", type=type(e).__name__)
+        cuts = {}
+    if cuts or (info["rotated"] and cur != src):
+        try:
+            if cuts:
+                out = os.path.join(work, "prepared.pdf")
+                rewrite_pages(cur, out, cuts)
+                if page_count(out) != pages + len(cuts):
+                    raise RuntimeError("unexpected page count")
+                cur, info["split"] = out, len(cuts)
+        except Exception as e:  # noqa: BLE001
+            log(ev="prep_error", step="split", type=type(e).__name__)
+    return cur
+
+def ocr_pdf(src, work, langs, dpi, psm=None, overlay=True, action="auto", prep_info=None):
     """Returns (PDF path, pages, per-OCR'd-page timings, mode, skipped pages).
 
     mode 'overlay': Tesseract produces only the text layer (textonly_pdf) and qpdf overlays it on the ORIGINAL PDF,
@@ -141,10 +311,21 @@ def ocr_pdf(src, work, langs, dpi, psm=None, overlay=True):
     pages = int(re.search(r"^Pages:\s+(\d+)", info.stdout, re.M).group(1))
     if pages > MAX_PAGES:
         raise PdfRejected("too_many_pages", f"PDF has {pages} pages; the limit is {MAX_PAGES}")
-    has_text = pages_with_text(src, pages)
-    if len(has_text) == pages:
+    has_text = pages_with_text(src, pages) if action != "flatten" else set()
+    if action != "flatten" and len(has_text) == pages:
         raise PdfRejected("already_searchable", "PDF already has text on every page")
-    use_overlay = overlay and overlay_safe(src, pages)
+    if prep_info is not None and action == "replace":
+        # prepare AFTER the cheap refusal above: straighten sideways pages, then split double-page spreads
+        prepared = prepare_pdf(src, work, pages, prep_info)
+        if prepared != src:
+            src = prepared
+            pages = page_count(src) or pages
+            if pages > MAX_PAGES:
+                raise PdfRejected("too_many_pages", f"PDF has {pages} pages after splitting; the limit is {MAX_PAGES}")
+            has_text = pages_with_text(src, pages)  # page numbers changed if pages were split
+    use_overlay = action != "flatten" and overlay and overlay_safe(src, pages)
+    if action == "replace" and not use_overlay:
+        raise PdfRejected("overlay_unavailable", "the text layer cannot be added to this PDF without re-encoding its pages")
     todo = [n for n in range(1, pages + 1) if not (use_overlay and n in has_text)]
     parts, per_page = [], []
     env = dict(os.environ, OMP_THREAD_LIMIT="1")
@@ -176,7 +357,9 @@ def ocr_pdf(src, work, langs, dpi, psm=None, overlay=True):
     r = run(["qpdf", src, "--overlay", merged, f"--from=1-{len(todo)}", "--to=" + ",".join(map(str, todo)), "--", out])
     if r.returncode not in (0, 3) or not os.path.exists(out) or page_count(out) != pages:  # 3 = warnings, output generated
         log(ev="overlay_fallback", pages=pages)
-        return ocr_pdf(src, work, langs, dpi, psm, overlay=False)
+        if action == "replace":
+            raise PdfRejected("overlay_unavailable", "adding the text layer failed")
+        return ocr_pdf(src, work, langs, dpi, psm, overlay=False, action=action)
     return out, pages, per_page, "overlay", pages - len(todo)
 
 
@@ -188,8 +371,10 @@ def _drive(url, token, *, method="GET", data=None, headers=None, timeout=120):
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         e.read()
-        if e.code in (401, 403):
+        if e.code == 401:
             raise JobError("drive_auth")
+        if e.code == 403:
+            raise JobError("drive_forbidden")  # no permission (for example, no edit access to the file)
         if e.code == 404:
             raise JobError("drive_not_found")  # Drive hides files without access behind a 404
         raise JobError("drive_error")
@@ -198,13 +383,14 @@ def _drive(url, token, *, method="GET", data=None, headers=None, timeout=120):
 
 
 def drive_meta(file_id, token):
-    url = f"{DRIVE_API}/files/{quote(file_id)}?fields=id,name,parents,size,mimeType&supportsAllDrives=true"
+    url = f"{DRIVE_API}/files/{quote(file_id)}?fields=id,name,parents,size,mimeType,md5Checksum,headRevisionId,appProperties&supportsAllDrives=true"
     with _drive(url, token) as r:
         return json.loads(r.read())
 
 
-def drive_download(file_id, token, dest):
-    url = f"{DRIVE_API}/files/{quote(file_id)}?alt=media&supportsAllDrives=true"
+def drive_download(file_id, token, dest, revision=None):
+    path = f"/files/{quote(file_id)}/revisions/{quote(revision)}" if revision else f"/files/{quote(file_id)}"
+    url = f"{DRIVE_API}{path}?alt=media&supportsAllDrives=true"
     total = 0
     with _drive(url, token, timeout=300) as r, open(dest, "wb") as f:
         while True:
@@ -228,6 +414,28 @@ def drive_upload(name, parents, path, token):
     url = f"{DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,parents&supportsAllDrives=true"
     with _drive(url, token, method="POST", data=body, headers={"Content-Type": "multipart/related; boundary=" + boundary}, timeout=300) as r:
         return json.loads(r.read()), len(pdf)
+
+
+def drive_replace(file_id, path, token, app_properties):
+    """Replaces the content of an existing file (same id, name and parents) and sets its appProperties (None deletes
+    a key). One multipart call, so content and properties change together."""
+    with open(path, "rb") as f:
+        pdf = f.read()
+    boundary = secrets.token_hex(16)
+    meta = json.dumps({"appProperties": app_properties}).encode()
+    body = (b"--" + boundary.encode() + b"\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + meta + b"\r\n--" + boundary.encode()
+            + b"\r\nContent-Type: application/pdf\r\n\r\n" + pdf + b"\r\n--" + boundary.encode() + b"--")
+    url = f"{DRIVE_UPLOAD}/files/{quote(file_id)}?uploadType=multipart&fields=id,headRevisionId,md5Checksum&supportsAllDrives=true"
+    with _drive(url, token, method="PATCH", data=body, headers={"Content-Type": "multipart/related; boundary=" + boundary}, timeout=300) as r:
+        return json.loads(r.read()), len(pdf)
+
+
+def drive_revision_pin(file_id, revision, token, keep):
+    """Marks a revision keepForever (or not). Needed so the original outlives Drive's purge of old versions."""
+    url = f"{DRIVE_API}/files/{quote(file_id)}/revisions/{quote(revision)}?fields=id,keepForever"
+    with _drive(url, token, method="PATCH", data=json.dumps({"keepForever": bool(keep)}).encode(),
+                headers={"Content-Type": "application/json"}) as r:
+        return json.loads(r.read())
 
 
 class AuthError(Exception):
@@ -271,7 +479,7 @@ def identify(token):
         with _drive(f"{DRIVE_API}/about?fields=user(permissionId)", token, timeout=10) as r:
             pid = json.loads(r.read())["user"]["permissionId"]
     except JobError as e:
-        raise AuthError(401 if e.code == "drive_auth" else 503)
+        raise AuthError(401 if e.code in ("drive_auth", "drive_forbidden") else 503)
     except (KeyError, TypeError, ValueError):
         raise AuthError(401)
     key = hmac.new(KEY_SALT, str(pid).encode(), "sha256").hexdigest()[:16]
@@ -280,9 +488,51 @@ def identify(token):
     return key
 
 
+def revert_job(job, meta, token, work):
+    """Restores the revision that the OCR replaced. Only when the file is still exactly our result (its md5 equals the
+    `ocrMd5` we stored in the file's appProperties): an edit made after the OCR is never thrown away."""
+    props = meta.get("appProperties") or {}
+    prev = props.get("ocrPrevRev")
+    if not prev:
+        raise JobError("nothing_to_revert")
+    if props.get("ocrMd5") != meta.get("md5Checksum"):
+        raise JobError("file_changed")
+    dest = os.path.join(work, "prev.pdf")
+    t0 = time.time()
+    try:
+        job["bytes_in"] = drive_download(job["_file_id"], token, dest, revision=prev)
+    except JobError as e:
+        raise JobError("revision_unavailable" if e.code in ("drive_not_found", "drive_error") else e.code) from e
+    job["download_s"] = round(time.time() - t0, 2)
+    with open(dest, "rb") as f:
+        if f.read(5) != b"%PDF-":
+            raise JobError("revision_unavailable")
+    cleared = {"ocrPrevRev": None, "ocrMd5": None, "ocrAt": None}  # null removes the property
+    t1 = time.time()
+    restored, size_out = drive_replace(job["_file_id"], dest, token, cleared)
+    if restored.get("id") != job["_file_id"]:
+        raise JobError("replace_failed")
+    try:
+        drive_revision_pin(job["_file_id"], prev, token, False)  # the original is the head again: free the pin
+    except JobError:
+        pass
+    job["upload_s"] = round(time.time() - t1, 2)
+    job["bytes_out"] = size_out
+    job["result_id"] = restored["id"]
+
+
 def process_job(job):
-    """Runs a whole job. The token lives only in `job['_token']` and is cleared by the caller."""
+    """Runs a whole job. The token lives only in `job['_token']` and is cleared by the caller.
+
+    action 'replace' (default): the searchable PDF replaces the original file's content (same file id). Before that the
+    original revision is pinned (keepForever) and recorded in the file's appProperties, so action 'revert' can restore it.
+    It only runs when the text layer can be overlaid on the original, because the full mode re-encodes pages in
+    grayscale and would degrade the original.
+    action 'revert': restores the pinned original revision (see revert_job).
+    action 'flatten': ignores any text the PDF already has, rasterizes every page, runs OCR again and writes a NEW file
+    "<name> (flatten).pdf" next to the original, so an existing OCR can be compared with ours."""
     token = job["_token"]
+    action = job["action"]
     work = tempfile.mkdtemp(prefix="job_")
     try:
         meta = drive_meta(job["_file_id"], token)
@@ -290,29 +540,67 @@ def process_job(job):
             raise JobError("not_pdf")
         if int(meta.get("size", 0) or 0) > MAX_BYTES:
             raise JobError("too_large")
+        if action == "revert":
+            revert_job(job, meta, token, work)
+            return
         parents = meta.get("parents")
-        if not parents:
-            raise JobError("no_parents")  # never create without `parents`: it would land in the root of My Drive
+        if action == "flatten" and not parents:
+            raise JobError("no_parents")  # a new file without `parents` would land in the root of My Drive
         src = os.path.join(work, "in.pdf")
         t_dl = time.time()
         job["bytes_in"] = drive_download(job["_file_id"], token, src)
         job["download_s"] = round(time.time() - t_dl, 2)
         t_ocr = time.time()
+        prep = {}
         try:
-            out, pages, per_page, mode, skipped = ocr_pdf(src, work, job["lang"], DPI, job.get("psm"))
+            out, pages, per_page, mode, skipped = ocr_pdf(src, work, job["lang"], DPI, job.get("psm"), action=action, prep_info=prep)
         except ValueError as e:
             code = e.code if isinstance(e, PdfRejected) else "internal"
             raise JobError(code) from e
         job["pages"], job["mode"], job["skipped"] = pages, mode, skipped
+        job["rotated"], job["split"] = prep.get("rotated", 0), prep.get("split", 0)
         job["ocr_s"] = round(time.time() - t_ocr, 2)
-        base = re.sub(r"\.pdf$", "", meta.get("name") or "document", flags=re.I)
         t_up = time.time()
-        created, size_out = drive_upload(base + " (OCR).pdf", parents, out, token)
+        if action == "replace":
+            fresh = drive_meta(job["_file_id"], token)
+            if fresh.get("md5Checksum") != meta.get("md5Checksum"):
+                raise JobError("file_changed")  # someone edited the file while it was being processed
+            prev_rev = fresh.get("headRevisionId")
+            if not prev_rev:
+                raise JobError("revision_unavailable")
+            try:
+                # pin the original revision so Revert still works after Drive's ~30-day purge of old versions
+                drive_revision_pin(job["_file_id"], prev_rev, token, True)
+            except JobError as e:
+                raise JobError("revision_unavailable") from e  # never replace what cannot be restored
+            with open(out, "rb") as f:
+                new_md5 = hashlib.md5(f.read()).hexdigest()
+            props = {"ocrPrevRev": prev_rev, "ocrMd5": new_md5, "ocrAt": time.strftime("%Y-%m-%d")}
+            try:
+                replaced, size_out = drive_replace(job["_file_id"], out, token, props)
+            except JobError:
+                try:
+                    drive_revision_pin(job["_file_id"], prev_rev, token, False)
+                except JobError:
+                    pass
+                raise
+            if replaced.get("id") != job["_file_id"]:
+                raise JobError("replace_failed")
+            old_prev = (fresh.get("appProperties") or {}).get("ocrPrevRev")
+            if old_prev and old_prev != prev_rev:  # an earlier OCR of this file left its original pinned
+                try:
+                    drive_revision_pin(job["_file_id"], old_prev, token, False)
+                except JobError:
+                    pass
+            job["result_id"] = replaced["id"]
+        else:
+            base = re.sub(r"\.pdf$", "", meta.get("name") or "document", flags=re.I)
+            created, size_out = drive_upload(base + " (flatten).pdf", parents, out, token)
+            if created.get("parents") != parents:
+                raise JobError("created_elsewhere")
+            job["result_id"] = created["id"]
         job["upload_s"] = round(time.time() - t_up, 2)
-        if created.get("parents") != parents:
-            raise JobError("created_elsewhere")
         job["bytes_out"] = size_out
-        job["result_id"] = created["id"]
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -355,7 +643,7 @@ def prune_jobs():
 
 
 def public_state(job):
-    keys = ("status", "error", "pages", "skipped", "mode", "result_id", "bytes_in", "bytes_out", "download_s", "ocr_s", "upload_s")
+    keys = ("status", "error", "action", "pages", "skipped", "rotated", "split", "mode", "result_id", "bytes_in", "bytes_out", "download_s", "ocr_s", "upload_s")
     out = {k: job[k] for k in keys if k in job}
     now = time.time()
     out["age_s"] = round(now - job["created"], 1)
@@ -489,14 +777,17 @@ class Handler(BaseHTTPRequestHandler):
             file_id = req["fileId"]
             langs = str(req.get("lang", "por+eng")).replace(" ", "+")
             psm = req.get("psm")
+            action = req.get("action", "replace")
         except (ValueError, KeyError, TypeError):
             return self._json(400, {"error": "invalid JSON: fileId is required"})
         if not isinstance(file_id, str) or not ID_RE.match(file_id):
             return self._json(400, {"error": "invalid fileId"})
         if not LANG_RE.match(langs) or (psm is not None and str(psm) not in {"3", "4", "6"}):
             return self._json(400, {"error": "invalid lang or psm"})
+        if action not in ("replace", "flatten", "revert"):
+            return self._json(400, {"error": "invalid action: use replace, flatten or revert"})
         now = time.time()
-        job = {"id": secrets.token_urlsafe(9), "status": "queued", "created": now, "lang": langs,
+        job = {"id": secrets.token_urlsafe(9), "status": "queued", "created": now, "lang": langs, "action": action,
                "psm": str(psm) if psm is not None else None, "_file_id": file_id, "_token": utoken, "_user": user}
         prune_jobs()
         with JOBS_LOCK:
