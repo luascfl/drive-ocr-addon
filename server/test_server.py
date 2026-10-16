@@ -625,6 +625,17 @@ class JobFlow(unittest.TestCase):
                         "-units", "PixelsPerInch", "-density", "150", png], check=True)
         return png
 
+    def test_version_file_constant_health_and_changelog_agree(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "VERSION")) as f:
+            file_version = f.read().strip()
+        self.assertRegex(file_version, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(S.VERSION, file_version)  # the server is deployed as one file, so it carries its own copy
+        code, body = call(self.base, "GET", "/health")
+        self.assertEqual((code, body["version"]), (200, file_version))
+        with open(os.path.join(root, "CHANGELOG.md")) as f:
+            self.assertIn(f"## [{file_version}]", f.read())  # every released version has a changelog entry
+
     def test_token_id_name_and_user_do_not_stay_in_state_or_log(self):
         self.add("ARQUIVO_0004")
         t = tok("bia")

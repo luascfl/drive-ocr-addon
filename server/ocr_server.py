@@ -43,6 +43,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
+VERSION = "0.1.0"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
 TOKEN = os.environ.get("OCR_TOKEN", "")
 PORT = int(os.environ.get("OCR_PORT", "8080"))
 HOST = os.environ.get("OCR_HOST", "127.0.0.1")
@@ -653,7 +654,7 @@ def public_state(job):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ocr/2"
+    server_version = "ocr/" + VERSION
 
     def log_message(self, *a):  # no default access log: avoids IP and path on disk
         pass
@@ -689,7 +690,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
-            return self._json(200, {"ok": True, "busy": BUSY._value == 0, "queued": QUEUE.qsize()})
+            return self._json(200, {"ok": True, "version": VERSION, "busy": BUSY._value == 0, "queued": QUEUE.qsize()})
         m = re.fullmatch(r"/jobs/([A-Za-z0-9_-]{6,40})", path)
         if m:
             who = self._user()

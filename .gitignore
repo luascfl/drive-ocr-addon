@@ -1,3 +1,8 @@
+# Private working context (notes, evidence, state) and agent profile files stay on disk only.
+.context/
+AGENTS.md
+GEMINI.md
+CLAUDE.md
 # Real documents must never be committed; only synthetic samples are tracked.
 samples/*
 !samples/synthetic/
