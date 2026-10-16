@@ -1,0 +1,20 @@
+Searchable PDF files let readers find words quickly without retyping
+the document.
+Tesseract reads scanned pages and returns plain text together with
+word positions.
+The quick brown fox jumps over the lazy dog while the pipeline
+measures memory.
+Totals: 1,204 pages processed, 98.6 percent accepted on the first
+attempt.
+Privacy matters, so the service deletes every temporary file after
+processing.
+Privacy matters, so the service deletes every temporary file after
+processing.
+Totals: 1,204 pages processed, 98.6 percent accepted on the first
+attempt.
+The quick brown fox jumps over the lazy dog while the pipeline
+measures memory.
+Tesseract reads scanned pages and returns plain text together with
+word positions.
+Searchable PDF files let readers find words quickly without retyping
+the document.

@@ -1,0 +1,6 @@
+# Real documents must never be committed; only synthetic samples are tracked.
+samples/*
+!samples/synthetic/
+!samples/README.md
+__pycache__/
+node_modules/

@@ -1,0 +1,26 @@
+{
+  "timeZone": "America/Bahia",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      { "userSymbol": "Drive", "serviceId": "drive", "version": "v3" }
+    ]
+  },
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/drive.addons.metadata.readonly",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/script.external_request"
+  ],
+  "addOns": {
+    "common": {
+      "name": "OCR for Drive",
+      "logoUrl": "https://www.gstatic.com/images/branding/product/1x/drive_2020q4_48dp.png",
+      "layoutProperties": { "primaryColor": "#1a73e8" }
+    },
+    "drive": {
+      "onItemsSelectedTrigger": { "runFunction": "onDriveItemsSelected" },
+      "homepageTrigger": { "runFunction": "onHomepage" }
+    }
+  }
+}

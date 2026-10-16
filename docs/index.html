@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCR for Drive</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; color: #202124; }
+  h1, h2 { line-height: 1.25; }
+  code { background: #f1f3f4; padding: 0 .25rem; border-radius: 3px; }
+  footer { margin-top: 3rem; font-size: .9rem; color: #5f6368; }
+</style>
+</head>
+<body>
+<h1>OCR for Drive</h1>
+<p>A Google Drive add-on that makes scanned PDFs <strong>searchable</strong>. Select a PDF in Drive, click "Start OCR", and within minutes a new file named <code>&lt;name&gt; (OCR).pdf</code> appears next to the original, with selectable, searchable text. The original is never modified.</p>
+
+<h2>What it does</h2>
+<ul>
+  <li>Recognizes text with Tesseract. The add-on currently requests Portuguese and English; the server also has Arabic and Hebrew installed, but they are not selectable in the add-on yet.</li>
+  <li>Keeps the PDF's original images and adds only an invisible text layer, so the new file is about 1% larger than the original.</li>
+  <li>Works only on the files you grant, one at a time, and saves the result in the same folder as the original.</li>
+  <li>PDFs that already have text on every page are refused, and no file is created.</li>
+</ul>
+
+<h2>Current limits</h2>
+<ul>
+  <li>This project is in a <strong>testing phase</strong>: it has not been verified by Google yet, so Google shows an "unverified app" warning.</li>
+  <li>Each user can run at most 2 jobs at once and 30 per day. The server is small: a 51-page PDF takes about 13 minutes.</li>
+  <li>PDFs up to 50 MB and 60 pages.</li>
+</ul>
+
+<h2>Privacy</h2>
+<p>The content of your documents is not stored. Read the <a href="privacy.html">privacy policy</a>.</p>
+
+<h2>Support and source</h2>
+<p>Questions and problems: open an issue in the project's GitHub repository. The server code and its tests are public in that repository.</p>
+
+<footer>Last updated: 2026-10-16.</footer>
+</body>
+</html>
