@@ -40,6 +40,7 @@ Per user: 2 active jobs and 30 jobs per 24 hours. Per file: 50 MB and 60 pages. 
 | `web/` | An in-browser OCR experiment (PDF.js, Tesseract.js, pdf-lib) kept as a measured alternative |
 | `samples/` | Synthetic sample PDFs |
 | `docs/` | Public pages (home and privacy policy) |
+| `LICENSE` | MIT license |
 
 ## Running the tests
 
@@ -72,4 +73,4 @@ Languages: the add-on currently asks for Portuguese and English (`por+eng`). The
 
 ## License
 
-Not chosen yet. Until a license file is added, all rights are reserved.
+[MIT](LICENSE). Note that Tesseract (Apache-2.0), Poppler (GPL) and qpdf (Apache-2.0) are separate programs the server calls; they are not bundled in this repository.
