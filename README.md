@@ -57,7 +57,11 @@ python3 -m unittest server.test_server -v
 
 Tests that depend on `qpdf` or `pypdf` are skipped when they are missing. Without `qpdf` the server cannot add a text layer to the original, so Start OCR is refused (`overlay_unavailable`) and only Flatten works; without `pypdf` double-page spreads are not split.
 
-## Running the server
+## Setting up a server
+
+On a fresh Ubuntu 24.04 VM, `sudo OCR_ALLOWED_AUD=<client id> ./deploy/setup.sh` installs the packages, a 2 GB swap, the systemd unit, 14-day journal retention and Caddy with an automatic HTTPS certificate (`OCR_HOST` overrides the default `<ip-with-dashes>.nip.io`). It is safe to run again: it keeps an existing token. It was tested in an Ubuntu 24.04 container without systemd and Caddy (packages, files, swap and `/health`, run twice); the systemd, Caddy and firewall parts were taken from the working VM but not re-run on a second VM. The cloud firewall must allow TCP 80 and 443.
+
+## Running the server by hand
 
 ```bash
 OCR_TOKEN=<24+ random chars, protects /process only> \

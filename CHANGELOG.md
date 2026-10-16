@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The version lives in `VERSION` and in `server/ocr_server.py` (`VERSION`); a test keeps them equal, and the server reports it at `GET /health`. This project follows [Semantic Versioning](https://semver.org/) and keeps a changelog in the [Keep a Changelog](https://keepachangelog.com/) style. Versions below 1.0.0 may still change behavior between minor releases.
 
+## [Unreleased]
+
+### Added
+- `deploy/setup.sh`: idempotent setup of the server on a fresh Ubuntu 24.04 VM.
+
 ## [0.1.0] - 2026-10-16
 
 First public release (testing phase: the add-on is not yet verified by Google, so Google shows an "unverified app" screen).
