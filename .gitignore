@@ -9,3 +9,6 @@ samples/*
 !samples/README.md
 __pycache__/
 node_modules/
+# Local clasp project binding and its extension-normalized pull artifact.
+.clasp.json
+addon/Code.js
