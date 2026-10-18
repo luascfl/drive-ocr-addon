@@ -78,6 +78,8 @@ Put an HTTPS reverse proxy in front of it. Other settings: `OCR_REQUIRED_SCOPE` 
 2. Link the script to your own Google Cloud project (Project Settings), then run `authorize()` once from the editor to grant every scope.
 3. Deploy it as a test add-on and open Drive.
 
+The installed add-on version appears below the title on the home, selected-file and job-status cards. Reopen the panel or refresh Drive after updating the script if an old card is still displayed. This label identifies the installed add-on code; the server reports its own version at `/health`. When preparing a release, keep `OCR_VERSION` in `addon/Code.gs`, `VERSION`, and the server's `VERSION` aligned.
+
 Languages: the add-on currently asks for Portuguese and English (`por+eng`). The server accepts any installed Tesseract language code.
 
 ## License

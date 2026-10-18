@@ -22,6 +22,7 @@
  * locally when the code is pasted into the editor; the repository does not hold the real value.
  */
 var OCR_URL = '__OCR_URL__';
+var OCR_VERSION = '0.1.2';
 var PROP_JOBS = 'OCR_JOBS';
 var PROP_PENDING = 'OCR_PENDING';
 var MAX_JOBS = 10;
@@ -54,7 +55,7 @@ var OCR_DONE = { replace: 'done, file replaced', flatten: 'done, new copy create
 
 function onHomepage() {
   return [CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle('OCR for Drive'))
+    .setHeader(CardService.newCardHeader().setTitle('OCR for Drive').setSubtitle('Version ' + OCR_VERSION))
     .addSection(CardService.newCardSection()
       .addWidget(CardService.newTextParagraph().setText('Select a scanned PDF in Drive and click Start OCR. The file is straightened if needed, double-page scans are split in half, and the file is replaced with a searchable version. You can revert it afterwards.'))
       .addWidget(CardService.newTextButton().setText('View OCR status')
@@ -114,7 +115,7 @@ function onDriveItemsSelected(e) {
       }
     });
   }
-  var card = CardService.newCardBuilder().setHeader(CardService.newCardHeader().setTitle('OCR for Drive'));
+  var card = CardService.newCardBuilder().setHeader(CardService.newCardHeader().setTitle('OCR for Drive').setSubtitle('Version ' + OCR_VERSION));
   var section = CardService.newCardSection();
   started.forEach(function (m) { section.addWidget(CardService.newTextParagraph().setText(m)); });
   var toStart = 0, toRevert = 0, pdfs = 0;
@@ -207,7 +208,7 @@ function buildStatusCard_() {
   });
   section.addWidget(CardService.newTextButton().setText('Refresh')
     .setOnClickAction(CardService.newAction().setFunctionName('onOcrStatusRefresh')));
-  return CardService.newCardBuilder().setHeader(CardService.newCardHeader().setTitle('OCR status')).addSection(section).build();
+  return CardService.newCardBuilder().setHeader(CardService.newCardHeader().setTitle('OCR status').setSubtitle('Version ' + OCR_VERSION)).addSection(section).build();
 }
 
 function onOcrStatus() {

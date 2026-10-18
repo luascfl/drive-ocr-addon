@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The version lives in `VERSION` and in `server/ocr_server.py` (`VERSION`); a test keeps them equal, and the server reports it at `GET /health`. This project follows [Semantic Versioning](https://semver.org/) and keeps a changelog in the [Keep a Changelog](https://keepachangelog.com/) style. Versions below 1.0.0 may still change behavior between minor releases.
 
+## [0.1.2] - 2026-10-18
+
+### Added
+- The add-on displays its installed version below the title on the home, selected-file and job-status cards.
+
 ## [0.1.1] - 2026-10-18
 
 ### Fixed
