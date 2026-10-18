@@ -22,7 +22,7 @@
  * locally when the code is pasted into the editor; the repository does not hold the real value.
  */
 var OCR_URL = '__OCR_URL__';
-var OCR_VERSION = '0.1.4';
+var OCR_VERSION = '0.1.5';
 var PROP_JOBS = 'OCR_JOBS';
 var PROP_PENDING = 'OCR_PENDING';
 var MAX_JOBS = 10;

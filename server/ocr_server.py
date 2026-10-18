@@ -43,7 +43,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "0.1.4"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
+VERSION = "0.1.5"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
 TOKEN = os.environ.get("OCR_TOKEN", "")
 PORT = int(os.environ.get("OCR_PORT", "8080"))
 HOST = os.environ.get("OCR_HOST", "127.0.0.1")
@@ -258,15 +258,12 @@ def page_sizes(path, pages):
 
 
 def rewrite_pages(src, dst, cuts):
-    """One pass with pypdf: bakes any /Rotate into the content and splits the pages in `cuts` ({0-based page:
-    fraction of the width}) by cropping, with no re-rasterizing and no copy of the images.
+    """Splits pages in `cuts` ({0-based page: fraction of width}) into independent, normalized pages.
 
-    Both halves are clones of the SAME page, so they share its content and its images; each one only gets its own
-    mediabox/cropbox (the right half's box starts at x > 0). The content is never translated, which is what keeps the
-    file small: translating needs one reader per half, which copied the images (measured: 39,747 B became 84,814 B).
-    When used after OCR, this clips the scan and its existing text layer in the same coordinate system."""
-    from pypdf import PdfReader, PdfWriter
-    from pypdf.generic import RectangleObject
+    Each half is rebuilt with a MediaBox and CropBox starting at (0, 0). The source page is translated into that box,
+    so its image and existing OCR layer stay in the same coordinate system. Merely narrowing the boxes leaves the
+    right half at a nonzero origin; some PDF viewers then select the original spread's multi-line text run."""
+    from pypdf import PdfReader, PdfWriter, Transformation
     reader, writer = PdfReader(src), PdfWriter()
     for i, page in enumerate(reader.pages):
         if page.rotation % 360:
@@ -278,10 +275,8 @@ def rewrite_pages(src, dst, cuts):
         x0, y0, x1, y1 = (float(v) for v in (box.left, box.bottom, box.right, box.top))
         cut = x0 + (x1 - x0) * cuts[i]
         for left, right in ((x0, cut), (cut, x1)):
-            added = writer.add_page(page)
-            rect = RectangleObject((left, y0, right, y1))
-            for name in ("mediabox", "cropbox", "trimbox", "bleedbox", "artbox"):
-                setattr(added, name, rect)
+            added = writer.add_blank_page(width=right - left, height=y1 - y0)
+            added.merge_transformed_page(page, Transformation().translate(tx=-left, ty=-y0), expand=False)
     with open(dst, "wb") as fh:
         writer.write(fh)
 

@@ -591,7 +591,7 @@ class JobFlow(unittest.TestCase):
         for w, h in sizes:
             self.assertAlmostEqual(float(h), 1000 * 72 / 150, delta=1)  # same height as the spread
         self.assertAlmostEqual(sum(float(w) for w, _ in sizes), 2000 * 72 / 150, delta=2)  # the two halves cover the spread
-        self.assertRegex(info, r"Page\s+2 MediaBox:\s+(?!0\.00\s)\d+\.\d+\s+0\.00")  # the right half's box starts at the cut, not at 0: the content is shared, not moved
+        self.assertRegex(info, r"Page\s+2 MediaBox:\s+0\.00\s+0\.00")  # every output page has its own normalized origin
         page = lambda n: subprocess.run(["pdftotext", "-f", str(n), "-l", str(n), out, "-"], capture_output=True, text=True).stdout
         self.assertIn("alpha", page(1))
         self.assertNotIn("juliet", page(1))

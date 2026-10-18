@@ -1,6 +1,11 @@
 # Changelog
 
 All notable changes are listed here. The version lives in `VERSION` and in `server/ocr_server.py` (`VERSION`); a test keeps them equal, and the server reports it at `GET /health`. This project follows [Semantic Versioning](https://semver.org/) and keeps a changelog in the [Keep a Changelog](https://keepachangelog.com/) style. Versions below 1.0.0 may still change behavior between minor releases.
+## [0.1.5] - 2026-10-18
+
+### Fixed
+- Split pages now have independent normalized coordinate origins. The scan and OCR layer are translated together into each half, instead of retaining a shared spread-wide text run that some viewers select across multiple lines.
+
 ## [0.1.4] - 2026-10-18
 
 ### Fixed
