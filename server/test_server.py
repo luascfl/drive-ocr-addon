@@ -504,10 +504,14 @@ class JobFlow(unittest.TestCase):
         with open(pdf, "rb") as f:
             return f.read()
 
-    def _spread_pdf(self, shadow=False, name="spread.pdf"):
+    def _spread_pdf(self, shadow=False, name="spread.pdf", grain=0.0):
         png = os.path.join(self.tmp, name + ".png")
-        cmd = ["convert", "-size", "2000x1000", "xc:white", "-font", "DejaVu-Sans", "-pointsize", "44", "-fill", "black",
-               "-annotate", "+80+300", self.LEFT_TEXT, "-annotate", "+1250+300", self.RIGHT_TEXT]
+        cmd = ["convert", "-size", "2000x1000", "xc:white"]
+        if grain:  # paper grain: a real scan is never pure white; 8 px dashes put about 0.9% of ink in every gap column
+            dashes = " ".join(f"rectangle {x},{(x * 37) % 980} {x + 2},{(x * 37) % 980 + 7}" for x in range(700, 1300, 3))
+            cmd += ["-fill", "black", "-draw", dashes]
+        cmd += ["-font", "DejaVu-Sans", "-pointsize", "44", "-fill", "black",
+                "-annotate", "+80+300", self.LEFT_TEXT, "-annotate", "+1250+300", self.RIGHT_TEXT]
         if shadow:
             cmd += ["-draw", "rectangle 975,0 1025,999"]
         subprocess.run(cmd + ["-units", "PixelsPerInch", "-density", "150", png], check=True)
@@ -544,6 +548,34 @@ class JobFlow(unittest.TestCase):
         subprocess.run(["convert", "-size", "2000x1000", "xc:white", "-font", "DejaVu-Sans", "-pointsize", "60", "-fill", "black",
                         "-annotate", "+80+450", "Quarterly results    and    outlook", "-units", "PixelsPerInch", "-density", "150", png], check=True)
         self.assertIsNone(self._gutter_of(self._to_pdf(png, "slide.pdf"), "g4.pdf"))
+
+    def test_gutter_is_found_on_a_grainy_scan_where_the_gap_is_not_pure_white(self):
+        data = self._spread_pdf(grain=True, name="grain.pdf")
+        base = os.path.join(self.tmp, "grain_probe")
+        with open(os.path.join(self.tmp, "grain.pdf"), "wb") as f:
+            f.write(data)
+        subprocess.run(["pdftoppm", "-r", "60", "-gray", "-singlefile", os.path.join(self.tmp, "grain.pdf"), base], check=True)
+        w, h, px = S.read_pgm(base + ".pgm")
+        gap_ink = [px[x::w][:h].translate(S.PGM_DARK).count(1) / h for x in range(int(w * 0.40), int(w * 0.60))]
+        self.assertGreater(min(gap_ink), 0.004)  # the fixture is noisy enough that the old 0.2% rule could not see the gap
+        cut = S.find_gutter(w, h, px)
+        self.assertIsNotNone(cut)
+        self.assertTrue(0.30 < cut < 0.60, cut)
+
+    def test_settle_cuts_fills_the_pages_that_found_nothing_and_fixes_the_outliers(self):
+        landscape = [0, 1, 2, 3, 4]
+        settled = S.settle_cuts({1: 0.48, 2: 0.50, 3: 0.51, 4: 0.69}, landscape)  # page 0 found nothing; page 4 is far off
+        self.assertEqual(sorted(settled), landscape)
+        self.assertEqual(settled[0], 0.51)  # the (upper) median of the four detections
+        self.assertEqual(settled[4], 0.51)  # 0.69 is 0.18 from the median: a detection error, not a real gutter
+        self.assertEqual((settled[1], settled[2], settled[3]), (0.48, 0.50, 0.51))  # honest detections are kept
+
+    def test_settle_cuts_does_not_force_a_split_on_a_mixed_document(self):
+        # 2 of 8 landscape pages found a gutter: most of the document is not a book scan, so only those 2 are cut
+        cuts = {0: 0.48, 5: 0.50}
+        self.assertEqual(S.settle_cuts(dict(cuts), list(range(8))), cuts)
+        # a single detection never drags the other landscape pages along
+        self.assertEqual(S.settle_cuts({2: 0.5}, [2, 3]), {2: 0.5})
 
     @unittest.skipUnless(shutil.which("qpdf"), "qpdf missing")
     def test_replace_splits_a_double_page_scan_and_each_half_is_ocrd_on_its_own_page(self):

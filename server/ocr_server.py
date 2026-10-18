@@ -43,7 +43,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "0.1.0"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
+VERSION = "0.1.1"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
 TOKEN = os.environ.get("OCR_TOKEN", "")
 PORT = int(os.environ.get("OCR_PORT", "8080"))
 HOST = os.environ.get("OCR_HOST", "127.0.0.1")
@@ -150,9 +150,9 @@ def find_gutter(w, h, px):
 
     Two kinds of gutter are accepted, both only near the middle of the page and both continuous along the whole height
     (a column is 'continuous' because its ink fraction is computed over every row):
-    - a blank gap (ink fraction <= 0.2% of the height) wide enough to be a margin pair, with text on BOTH sides;
+    - a low-ink gap at least 3% wide, relative to the page's text density, with content on BOTH sides;
     - a dark shadow band (ink fraction >= 50%) with lighter flanks, centered on the band.
-    The cut goes through the middle of the gap, so it cannot slice a word. Nothing reliable found: None (no split)."""
+    The cut goes through the middle of the detected gap. Nothing reliable found: None (no split)."""
     if w < 50 or h < 50 or len(px) < w * h:
         return None
     ink = [px[x::w][:h].translate(PGM_DARK).count(1) / h for x in range(w)]
@@ -178,13 +178,48 @@ def find_gutter(w, h, px):
         if a > flank and b + flank < w and side_ink(a - flank, a) < 0.3 and side_ink(b, b + flank) < 0.3 \
                 and side_ink(0, a) >= 0.004 and side_ink(b, w) >= 0.004:
             return (a + b) / 2 / w
-    # 2) blank gap of at least 3% of the width (a word space is about 1%, a pair of page margins is much wider)
-    gaps = [r for r in runs(lambda v: v <= 0.002, max(3, int(w * 0.03))) if r[0] > 0 and r[1] < w
+    # 2) quiet gap of at least 3% of the width (a word space is about 1%, a pair of page margins is much wider).
+    # Real scans are never pure white (paper grain, a soft shadow near the fold: 1-3% of the pixels in a column), so
+    # "quiet" is relative to the page's own text: under 30% of the median text-column ink (at most 6%), measured on a
+    # moving average a few columns wide so that one stray speck does not split the gap in two.
+    k = max(3, int(w * 0.01)) | 1
+    smooth = [sum(ink[max(0, x - k // 2):x + k // 2 + 1]) / len(ink[max(0, x - k // 2):x + k // 2 + 1]) for x in range(w)]
+    body = sorted(v for v in smooth[int(w * 0.05):int(w * 0.95)] if v >= 0.04)
+    if not body:
+        return None
+    quiet = max(0.002, min(0.06, 0.3 * body[len(body) // 2]))
+    gaps = []
+    start = None
+    for x in range(w + 1):
+        ok = x < w and smooth[x] <= quiet
+        if ok and start is None:
+            start = x
+        elif not ok and start is not None:
+            gaps.append((start, x))
+            start = None
+    gaps = [r for r in gaps if r[1] - r[0] >= max(3, int(w * 0.03)) and r[0] <= hi and r[1] >= lo and r[0] > 0 and r[1] < w
             and side_ink(0, r[0]) >= 0.004 and side_ink(r[1], w) >= 0.004]
     if gaps:
         a, b = max(gaps, key=lambda r: r[1] - r[0])
         return (a + b) / 2 / w
     return None
+
+
+SPREAD_CONSENSUS_MIN = 3  # landscape pages with a detected gutter needed before the others follow them
+SPREAD_CONSENSUS_TOL = 0.08  # a cut this far (fraction of the width) from the median is treated as a detection error
+
+
+def settle_cuts(cuts, landscape):
+    """Uses the document as a whole to correct the per-page gutter guesses. `cuts` maps a 0-based page to its cut and
+    `landscape` lists the pages that may be spreads. When at least three and at least half of the landscape pages
+    found a gutter, missing and outlying cuts use the median position; cuts within 8% of it stay unchanged.
+    This assumes a uniform book scan, including chapter openings and sparse facing pages. Mixed-layout documents
+    whose landscape pages mostly resemble spreads can therefore be split incorrectly."""
+    if len(cuts) < SPREAD_CONSENSUS_MIN or len(cuts) * 2 < len(landscape):
+        return cuts
+    ordered = sorted(cuts.values())
+    median = ordered[len(ordered) // 2]
+    return {i: (cuts[i] if i in cuts and abs(cuts[i] - median) <= SPREAD_CONSENSUS_TOL else median) for i in landscape}
 
 
 def sample_pages(pages, k=5):
@@ -268,11 +303,12 @@ def prepare_pdf(src, work, pages, info):
         r = run(["qpdf", "--rotate=+%d" % rot, src, "--", rotated])
         if r.returncode in (0, 3) and os.path.exists(rotated) and page_count(rotated) == pages:
             cur, info["rotated"] = rotated, rot
-    cuts = {}
+    cuts, landscape = {}, []
     try:
         for i, (w, h) in enumerate(page_sizes(cur, pages)):
             if w / h < SPREAD_MIN_ASPECT:
                 continue  # only landscape pages can be two pages side by side
+            landscape.append(i)
             base = os.path.join(work, f"gut{i:04d}")
             if run(["pdftoppm", "-r", "60", "-gray", "-f", str(i + 1), "-l", str(i + 1), "-singlefile", cur, base]).returncode != 0:
                 continue
@@ -280,6 +316,7 @@ def prepare_pdf(src, work, pages, info):
             os.remove(base + ".pgm")
             if cut is not None:
                 cuts[i] = cut
+        cuts = settle_cuts(cuts, landscape)
     except Exception as e:  # noqa: BLE001
         log(ev="prep_error", step="gutter", type=type(e).__name__)
         cuts = {}

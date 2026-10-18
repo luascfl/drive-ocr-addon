@@ -2,7 +2,11 @@
 
 All notable changes are listed here. The version lives in `VERSION` and in `server/ocr_server.py` (`VERSION`); a test keeps them equal, and the server reports it at `GET /health`. This project follows [Semantic Versioning](https://semver.org/) and keeps a changelog in the [Keep a Changelog](https://keepachangelog.com/) style. Versions below 1.0.0 may still change behavior between minor releases.
 
-## [Unreleased]
+## [0.1.1] - 2026-10-18
+
+### Fixed
+- **Double-page scans were not split.** The gutter detector required an almost pure white gap (at most 0.2% dark pixels per column), but real scans have 1 to 3% of grain and shadow, so it found no gutter in any of the 29 pages of a real book scan. A gap is now "quiet" relative to the page's own text (under 30% of the median text-column ink, at most 6%), measured on a moving average. On that scan 27 of 29 spreads were detected correctly by the page alone (one found nothing and one guessed wrong).
+- When at least three and at least half of the landscape pages have a detected gutter, missing cuts and guesses more than 8% of the width from the median use that median; the other cuts stay unchanged. This fixed a chapter opening with a narrow gutter and a photo page with an almost empty facing page (the guess was 69% of the width). This assumes a uniform book scan and can misclassify mixed-layout documents.
 
 ### Added
 - `deploy/setup.sh`: idempotent setup of the server on a fresh Ubuntu 24.04 VM.
