@@ -5,8 +5,8 @@ Routes:
 - POST /jobs      Authorization: Bearer <user's OAuth token, drive.file scope>; JSON {"fileId", "action"?, "lang"?, "psm"?}.
                   The token is validated (aud = OCR_ALLOWED_AUD, drive.file scope) and the user is identified by the
                   Drive permissionId (only an in-memory HMAC). Queues the job and answers 202 right away.
-                  action "replace" (default): downloads the PDF, straightens sideways pages, splits double-page spreads,
-                  runs OCR on the pages without text and REPLACES the file's content, after pinning the original
+                  action "replace" (default): downloads the PDF, straightens sideways pages, runs OCR on each intact
+                  spread, then splits double-page spreads and REPLACES the file's content, after pinning the original
                   revision (keepForever) and recording it in the file's appProperties. action "revert": restores that
                   revision, only while the file still equals our result. action "flatten": ignores existing text,
                   re-runs OCR on every page and writes a NEW "<name> (flatten).pdf" in the original's folder (it needs
@@ -43,7 +43,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "0.1.3"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
+VERSION = "0.1.4"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
 TOKEN = os.environ.get("OCR_TOKEN", "")
 PORT = int(os.environ.get("OCR_PORT", "8080"))
 HOST = os.environ.get("OCR_HOST", "127.0.0.1")
@@ -262,9 +262,9 @@ def rewrite_pages(src, dst, cuts):
     fraction of the width}) by cropping, with no re-rasterizing and no copy of the images.
 
     Both halves are clones of the SAME page, so they share its content and its images; each one only gets its own
-    mediabox/cropbox (the right half's box starts at x > 0, and qpdf --overlay lines the text layer up with it:
-    measured 0.0 pt against full-mode OCR). The content is never translated, which is what keeps the file small:
-    translating needs one reader per half, which copied the images (measured: 39,747 B became 84,814 B)."""
+    mediabox/cropbox (the right half's box starts at x > 0). The content is never translated, which is what keeps the
+    file small: translating needs one reader per half, which copied the images (measured: 39,747 B became 84,814 B).
+    When used after OCR, this clips the scan and its existing text layer in the same coordinate system."""
     from pypdf import PdfReader, PdfWriter
     from pypdf.generic import RectangleObject
     reader, writer = PdfReader(src), PdfWriter()
@@ -287,10 +287,11 @@ def rewrite_pages(src, dst, cuts):
 
 
 def prepare_pdf(src, work, pages, info):
-    """Prepares a PDF for OCR, in this order: (1) orientation, (2) split of double-page spreads. Returns the path of
-    the prepared PDF (`src` itself when nothing needed to change) and fills `info` with `rotated` (degrees) and
-    `split` (number of pages that were split). A failure in an optional step is logged and skipped, never fatal.
-    Rotation goes first because the crop split assumes upright pages (a sideways spread is not landscape)."""
+    """Prepares orientation and finds double-page cuts before OCR.
+
+    Returns the oriented PDF and its requested cuts. The cuts are deliberately applied only after OCR: text and image
+    then share one coordinate system before both halves are cropped. Optional preparation failures are logged and
+    skipped."""
     info.update(rotated=0, split=0)
     cur = src
     try:
@@ -320,17 +321,7 @@ def prepare_pdf(src, work, pages, info):
     except Exception as e:  # noqa: BLE001
         log(ev="prep_error", step="gutter", type=type(e).__name__)
         cuts = {}
-    if cuts or (info["rotated"] and cur != src):
-        try:
-            if cuts:
-                out = os.path.join(work, "prepared.pdf")
-                rewrite_pages(cur, out, cuts)
-                if page_count(out) != pages + len(cuts):
-                    raise RuntimeError("unexpected page count")
-                cur, info["split"] = out, len(cuts)
-        except Exception as e:  # noqa: BLE001
-            log(ev="prep_error", step="split", type=type(e).__name__)
-    return cur
+    return cur, cuts
 
 def ocr_pdf(src, work, langs, dpi, psm=None, overlay=True, action="auto", prep_info=None):
     """Returns (PDF path, pages, per-OCR'd-page timings, mode, skipped pages).
@@ -352,19 +343,18 @@ def ocr_pdf(src, work, langs, dpi, psm=None, overlay=True, action="auto", prep_i
     has_text = pages_with_text(src, pages) if action != "flatten" else set()
     if action != "flatten" and len(has_text) == pages:
         raise PdfRejected("already_searchable", "PDF already has text on every page")
+    cuts = {}
     if prep_info is not None and action == "replace":
-        # prepare AFTER the cheap refusal above: straighten sideways pages, then split double-page spreads
-        prepared = prepare_pdf(src, work, pages, prep_info)
+        # Refuse cheaply first; OCR the intact, upright spread; crop the image and text layer together afterwards.
+        prepared, cuts = prepare_pdf(src, work, pages, prep_info)
         if prepared != src:
             src = prepared
-            pages = page_count(src) or pages
-            if pages > MAX_PAGES:
-                raise PdfRejected("too_many_pages", f"PDF has {pages} pages after splitting; the limit is {MAX_PAGES}")
-            has_text = pages_with_text(src, pages)  # page numbers changed if pages were split
+            has_text = pages_with_text(src, pages)
     use_overlay = action != "flatten" and overlay and overlay_safe(src, pages)
     if action == "replace" and not use_overlay:
         raise PdfRejected("overlay_unavailable", "the text layer cannot be added to this PDF without re-encoding its pages")
     todo = [n for n in range(1, pages + 1) if not (use_overlay and n in has_text)]
+    skipped = pages - len(todo)
     parts, per_page = [], []
     env = dict(os.environ, OMP_THREAD_LIMIT="1")
     for n in todo:
@@ -391,14 +381,25 @@ def ocr_pdf(src, work, langs, dpi, psm=None, overlay=True, action="auto", prep_i
     if not use_overlay:
         return merged, pages, per_page, "full", 0
     out = os.path.join(work, "out.pdf")
-    # page i of the text layer goes to page todo[i] of the original
+    # Page i of the text layer goes to page todo[i] of the original. Split only after this overlay so its coordinates
+    # and the scan are cropped together.
     r = run(["qpdf", src, "--overlay", merged, f"--from=1-{len(todo)}", "--to=" + ",".join(map(str, todo)), "--", out])
     if r.returncode not in (0, 3) or not os.path.exists(out) or page_count(out) != pages:  # 3 = warnings, output generated
         log(ev="overlay_fallback", pages=pages)
         if action == "replace":
             raise PdfRejected("overlay_unavailable", "adding the text layer failed")
         return ocr_pdf(src, work, langs, dpi, psm, overlay=False, action=action)
-    return out, pages, per_page, "overlay", pages - len(todo)
+    if cuts:
+        split = os.path.join(work, "split.pdf")
+        try:
+            rewrite_pages(out, split, cuts)
+            if page_count(split) != pages + len(cuts):
+                raise RuntimeError("unexpected page count")
+        except Exception as e:  # noqa: BLE001
+            log(ev="prep_error", step="split", type=type(e).__name__)
+        else:
+            out, pages, prep_info["split"] = split, pages + len(cuts), len(cuts)
+    return out, pages, per_page, "overlay", skipped
 
 
 # ---- Drive ----

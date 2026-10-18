@@ -1,6 +1,11 @@
 # Changelog
 
 All notable changes are listed here. The version lives in `VERSION` and in `server/ocr_server.py` (`VERSION`); a test keeps them equal, and the server reports it at `GET /health`. This project follows [Semantic Versioning](https://semver.org/) and keeps a changelog in the [Keep a Changelog](https://keepachangelog.com/) style. Versions below 1.0.0 may still change behavior between minor releases.
+## [0.1.4] - 2026-10-18
+
+### Fixed
+- OCR now runs on the intact spread before a detected double-page scan is split. The final crop applies equally to the original scan and its text layer, keeping selection coordinates in the same coordinate system.
+
 
 ## [0.1.3] - 2026-10-18
 

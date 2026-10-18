@@ -578,7 +578,7 @@ class JobFlow(unittest.TestCase):
         self.assertEqual(S.settle_cuts({2: 0.5}, [2, 3]), {2: 0.5})
 
     @unittest.skipUnless(shutil.which("qpdf"), "qpdf missing")
-    def test_replace_splits_a_double_page_scan_and_each_half_is_ocrd_on_its_own_page(self):
+    def test_replace_splits_a_double_page_scan_after_ocr(self):
         pytest_pypdf = __import__("importlib").util.find_spec("pypdf")
         if not pytest_pypdf:
             self.skipTest("pypdf missing")
@@ -599,22 +599,28 @@ class JobFlow(unittest.TestCase):
         self.assertNotIn("alpha", page(2))
         imgs = subprocess.run(["pdfimages", "-list", out], capture_output=True, text=True).stdout.splitlines()[2:]
         self.assertEqual({l.split()[3] for l in imgs}, {"2000"})  # the original image, not re-rasterized
-        self.assertLess(len(FakeGoogle.uploads[-1][2]) - len(spread), 2 * 4000)  # only two text layers were added; the image is shared by both halves (a copy of it measured +19 KB here)
+        self.assertLess(len(FakeGoogle.uploads[-1][2]) - len(spread), 2 * 4000)  # one spread text layer and cloned page dictionaries; the image remains shared
 
     @unittest.skipUnless(shutil.which("qpdf"), "qpdf missing")
-    def test_text_layer_of_split_pages_lines_up_with_full_mode_ocr(self):
+    def test_split_after_ocr_keeps_the_text_layer_aligned_with_full_mode(self):
         if not __import__("importlib").util.find_spec("pypdf"):
             self.skipTest("pypdf missing")
         src = os.path.join(self.tmp, "sp_src.pdf")
         with open(src, "wb") as f:
             f.write(self._spread_pdf(name="sp_src_raw.pdf"))
-        work = tempfile.mkdtemp(dir=self.tmp)
+        result_work = tempfile.mkdtemp(dir=self.tmp)
         info = {}
-        prepared = S.prepare_pdf(src, work, 1, info)
-        self.assertEqual((info["split"], S.page_count(prepared)), (1, 2))
-        overlay, *_ = S.ocr_pdf(prepared, work, "por+eng", 300, action="replace")
-        full, *_ = S.ocr_pdf(prepared, work, "por+eng", 300, overlay=False)
-        a, b = self._words(full), self._words(overlay)
+        overlay, pages, *_ = S.ocr_pdf(src, result_work, "por+eng", 300, action="replace", prep_info=info)
+        self.assertEqual((info["split"], pages, S.page_count(overlay)), (1, 2, 2))
+
+        reference_work = tempfile.mkdtemp(dir=self.tmp)
+        prepared, cuts = S.prepare_pdf(src, reference_work, 1, {})
+        self.assertEqual((S.page_count(prepared), len(cuts)), (1, 1))
+        full, *_ = S.ocr_pdf(prepared, tempfile.mkdtemp(dir=self.tmp), "por+eng", 300, overlay=False)
+        reference = os.path.join(reference_work, "reference.pdf")
+        S.rewrite_pages(full, reference, cuts)
+
+        a, b = self._words(reference), self._words(overlay)
         self.assertGreaterEqual(len(a), 12)
         self.assertEqual([w[0] for w in a], [w[0] for w in b])
         dev = max(abs(x[i] - y[i]) for x, y in zip(a, b) for i in range(1, 5))
@@ -644,7 +650,8 @@ class JobFlow(unittest.TestCase):
         src = os.path.join(self.tmp, "up.pdf")
         with open(src, "wb") as f:
             f.write(self._to_pdf(self._png_text(), "up_raw.pdf"))
-        self.assertEqual(S.prepare_pdf(src, work, 1, info), src)  # same path: nothing was rewritten
+        prepared, cuts = S.prepare_pdf(src, work, 1, info)
+        self.assertEqual((prepared, cuts), (src, {}))
         self.assertEqual((info["rotated"], info["split"]), (0, 0))
 
     def _png_text(self):
