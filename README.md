@@ -62,6 +62,18 @@ Tests that depend on `qpdf` or `pypdf` are skipped when they are missing. Withou
 
 On a fresh Ubuntu 24.04 VM, `sudo OCR_ALLOWED_AUD=<client id> ./deploy/setup.sh` installs the packages, a 2 GB swap, the systemd unit, 14-day journal retention and Caddy with an automatic HTTPS certificate (`OCR_HOST` overrides the default `<ip-with-dashes>.nip.io`). It is safe to run again: it keeps an existing token. It was tested in an Ubuntu 24.04 container without systemd and Caddy (packages, files, swap and `/health`, run twice); the systemd, Caddy and firewall parts were taken from the working VM but not re-run on a second VM. The cloud firewall must allow TCP 80 and 443.
 
+## Updating the deployed server
+
+Run from a checked-out release:
+
+```bash
+./deploy/update.sh --check          # health and version only
+./deploy/update.sh                  # deploy only if the service is idle
+./deploy/update.sh --wait 600       # wait up to 10 minutes for jobs to finish
+```
+
+The script reads the operator-local cached VM IP, host and SSH key. It refuses to restart while an OCR is running or queued, compiles the new Python file before installation, restores the previous file if systemd cannot start, and pins the public health check to the cached IP. `--dry-run` checks the three version constants without using the network. It cannot update Apps Script because the repository intentionally has no Apps Script deployment credential; after a release, paste `addon/Code.gs` into Apps Script as described below. Run `./deploy/test_update.sh` to exercise the script with simulated network and SSH commands.
+
 ## Running the server by hand
 
 ```bash

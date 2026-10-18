@@ -43,7 +43,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "0.1.2"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
+VERSION = "0.1.3"  # keep equal to the VERSION file at the repository root (a test checks it); the server is deployed as one file
 TOKEN = os.environ.get("OCR_TOKEN", "")
 PORT = int(os.environ.get("OCR_PORT", "8080"))
 HOST = os.environ.get("OCR_HOST", "127.0.0.1")

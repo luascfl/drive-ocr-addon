@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The version lives in `VERSION` and in `server/ocr_server.py` (`VERSION`); a test keeps them equal, and the server reports it at `GET /health`. This project follows [Semantic Versioning](https://semver.org/) and keeps a changelog in the [Keep a Changelog](https://keepachangelog.com/) style. Versions below 1.0.0 may still change behavior between minor releases.
 
+## [0.1.3] - 2026-10-18
+
+### Added
+- `deploy/update.sh`: checked deployment for the existing Oracle VM. It refuses to restart while jobs are busy or queued, validates release versions, checks public health through the cached host and IP, validates Python before installing, restores the previous server if systemd cannot restart it, then confirms the version. It prints the separate Apps Script update step.
+
 ## [0.1.2] - 2026-10-18
 
 ### Added
